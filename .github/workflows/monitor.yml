@@ -1,0 +1,97 @@
+name: Monitor and crash test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  monitor-and-crash-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CHECK_INTERVAL: "1"
+      RULES_FILE: rules.ci.yaml
+      TERM: xterm
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monitor with CPU crash test
+        id: monitor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python main.py > dashboard-output.log 2>&1 &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+
+          sleep 3
+          python demo_crash.py --scenario cpu --duration 25 --workers 2
+          sleep 7
+
+          kill "$monitor_pid" 2>/dev/null || true
+          wait "$monitor_pid" 2>/dev/null || true
+
+          grep -q "CPU ALERT" monitor.log
+
+      - name: Print Markdown result
+        if: always()
+        shell: bash
+        env:
+          STEP_RESULT: ${{ steps.monitor.outcome }}
+        run: |
+          alert_count=$(grep -c "CPU ALERT" monitor.log 2>/dev/null || true)
+
+          {
+            echo "## Self-Healing Monitor Result"
+            echo
+            if [ "$STEP_RESULT" = "success" ]; then
+              echo "**Status:** ✅ Passed"
+            else
+              echo "**Status:** ❌ Failed"
+            fi
+            echo
+            echo "| Check | Result |"
+            echo "|---|---:|"
+            echo "| Monitor + crash test | $STEP_RESULT |"
+            echo "| CPU alerts detected | $alert_count |"
+            echo
+            echo "### Last monitor logs"
+            echo '```text'
+            if [ -f monitor.log ]; then
+              tail -n 30 monitor.log
+            else
+              echo "monitor.log was not created"
+            fi
+            echo '```'
+          } > summary.md
+
+          cat summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload monitor logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: monitor-logs
+          path: |
+            monitor.log
+            dashboard-output.log
+            summary.md
+          if-no-files-found: warn

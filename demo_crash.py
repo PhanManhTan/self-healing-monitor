@@ -1,76 +1,56 @@
-import time
+import argparse
 import multiprocessing
-import sys
+import time
 
-def cpu_stress():
-    """Spawn an infinite loop to max out one CPU core."""
+
+def burn_cpu() -> None:
     while True:
         pass
 
-def ram_stress(mb=512):
-    """Allocate and hold memory to simulate RAM spike."""
-    print(f"  Allocating {mb}MB RAM...")
-    data = []
-    for _ in range(mb):
-        data.append(bytearray(1024 * 1024))  # 1MB chunks
-    while True:
+
+def use_memory(megabytes: int) -> None:
+    data = [bytearray(1024 * 1024) for _ in range(megabytes)]
+    while data:
         time.sleep(1)
 
-if __name__ == "__main__":
-    print("=== Self-Healing Monitor — Demo ===\n")
-    print("Choose a scenario:\n")
-    print("  1) CPU spike   — max out all CPU cores")
-    print("  2) RAM spike   — allocate 512MB of memory")
-    print("  3) Both        — CPU + RAM stress")
-    print("  4) Quick CPU   — 1 core for 30 seconds then stop")
-    print()
 
-    choice = input("Select (1/2/3/4): ").strip()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="CPU/RAM stress test")
+    parser.add_argument("--scenario", choices=["cpu", "ram", "both"])
+    parser.add_argument("--duration", type=int, default=30)
+    parser.add_argument("--workers", type=int, default=multiprocessing.cpu_count())
+    parser.add_argument("--memory-mb", type=int, default=512)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if not args.scenario:
+        choice = input("1) CPU\n2) RAM\n3) Both\nSelect: ").strip()
+        args.scenario = {"1": "cpu", "2": "ram", "3": "both"}.get(choice)
+    if not args.scenario:
+        raise SystemExit("Invalid scenario")
 
     processes = []
+    if args.scenario in {"cpu", "both"}:
+        for _ in range(max(1, args.workers)):
+            processes.append(multiprocessing.Process(target=burn_cpu))
+    if args.scenario in {"ram", "both"}:
+        processes.append(multiprocessing.Process(target=use_memory, args=(args.memory_mb,)))
 
-    if choice in ("1", "3"):
-        cores = multiprocessing.cpu_count()
-        print(f"\nSpawning {cores} CPU stress workers...")
-        for _ in range(cores):
-            p = multiprocessing.Process(target=cpu_stress, name="demo_cpu_stress")
-            p.start()
-            processes.append(p)
-
-    if choice in ("2", "3"):
-        print("\nSpawning RAM stress worker...")
-        p = multiprocessing.Process(target=ram_stress, name="demo_ram_stress")
-        p.start()
-        processes.append(p)
-
-    if choice == "4":
-        print("\nSpawning 1 CPU worker for 30 seconds...")
-        p = multiprocessing.Process(target=cpu_stress, name="demo_cpu_stress")
-        p.start()
-        processes.append(p)
-
-        time.sleep(30)
-        for p in processes:
-            p.terminate()
-        print("Done. CPU stress stopped after 30s.")
-        sys.exit(0)
-
-    if not processes:
-        print("Invalid choice.")
-        sys.exit(1)
-
-    print(f"\n{len(processes)} stress worker(s) running.")
-    print("   The monitor should detect and notify shortly.")
-    print("   Press Ctrl+C to stop.\n")
+    print(f"Starting {args.scenario} stress for {args.duration}s")
+    for process in processes:
+        process.start()
 
     try:
-        while True:
-            alive = sum(1 for p in processes if p.is_alive())
-            print(f"\r   Workers alive: {alive}/{len(processes)}", end="", flush=True)
-            time.sleep(2)
-    except KeyboardInterrupt:
-        print("\n\nStopping workers...")
-        for p in processes:
-            p.terminate()
-        print("Done.")
-        sys.exit(0)
+        time.sleep(max(1, args.duration))
+    finally:
+        for process in processes:
+            process.terminate()
+        for process in processes:
+            process.join()
+    print("Stress test finished")
+
+
+if __name__ == "__main__":
+    main()

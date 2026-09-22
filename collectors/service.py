@@ -1,13 +1,15 @@
 import subprocess
 
+
 def check_service(service_name: str) -> str:
-    """Check the status of a systemd service."""
+    """Return a systemd service status."""
     try:
         result = subprocess.run(
             ["systemctl", "is-active", service_name],
-            capture_output=True, text=True
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-        status = result.stdout.strip()
-        return status if status else "inactive"
-    except Exception:
-        return "unknown"
+        return result.stdout.strip() or "inactive"
+    except (OSError, subprocess.SubprocessError):
+        return "unsupported"

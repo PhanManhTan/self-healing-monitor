@@ -1,0 +1,19 @@
+rules:
+  - name: Monitor CPU
+    type: cpu
+    thresholds: [20, 50, 80]
+    cooldown: 10
+    interval: 5
+
+  - name: Monitor RAM
+    type: memory
+    thresholds: [80, 90, 95]
+    cooldown: 10
+    interval: 5
+
+  - name: Monitor Processes
+    type: process_auto
+    cpu_threshold: 70
+    ram_threshold: 80
+    cooldown: 10
+    interval: 5

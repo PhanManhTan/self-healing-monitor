@@ -1,208 +1,134 @@
-import time
+import shlex
 import subprocess
-from typing import Dict, Any
-from notifiers.telegram import send_message
+import time
+from typing import Any, Callable
+
+from collectors.process import find_heavy_processes
 from collectors.service import check_service
-from collectors.system import check_disk
-
-cooldown_memory: Dict[str, float] = {}
-
-
-def _get_severity(value, thresholds):
-    """Determine alert severity based on which threshold is exceeded."""
-    thresholds = sorted(thresholds)
-    exceeded = [t for t in thresholds if value >= t]
-    if not exceeded:
-        return None, None
-    highest = exceeded[-1]
-    idx = thresholds.index(highest)
-    if idx == len(thresholds) - 1:
-        return highest, "[DANGER]"
-    elif idx == len(thresholds) - 2:
-        return highest, "[CRITICAL]"
-    else:
-        return highest, "[WARNING]"
+from collectors.system import check_cpu, check_disk, check_memory
+from notifiers.telegram import send_message
 
 
-def _handle_threshold_alert(rule_name, metric_name, value, threshold, severity, cooldown):
-    """Send notification for threshold-based alerts. Returns (alert_msg, is_cooldown)."""
-    cooldown_key = f"{rule_name}_{threshold}"
-    last_run = cooldown_memory.get(cooldown_key, 0)
+cooldowns: dict[str, float] = {}
+
+
+def _can_alert(key: str, seconds: int) -> bool:
     now = time.time()
+    if now - cooldowns.get(key, 0) < seconds:
+        return False
+    cooldowns[key] = now
+    return True
 
-    if now - last_run < cooldown:
-        return None, True
 
-    alert_msg = (
-        f"{severity} *{metric_name} ALERT*\n"
-        f"Rule: {rule_name}\n"
+def _severity(value: int, thresholds: list[int]) -> tuple[int | None, str | None]:
+    ordered = sorted(thresholds)
+    passed = [threshold for threshold in ordered if value >= threshold]
+    if not passed:
+        return None, None
+
+    threshold = passed[-1]
+    position = ordered.index(threshold)
+    if position == len(ordered) - 1:
+        return threshold, "DANGER"
+    if position == len(ordered) - 2:
+        return threshold, "CRITICAL"
+    return threshold, "WARNING"
+
+
+def _metric_result(
+    rule: dict[str, Any],
+    label: str,
+    collector: Callable[[], int],
+    defaults: list[int],
+) -> dict[str, Any]:
+    value = collector()
+    result = {"text": f"{label}: {value}%", "value": value, "is_cooldown": False}
+    threshold, severity = _severity(value, rule.get("thresholds", defaults))
+    if threshold is None:
+        return result
+
+    key = f"{rule['name']}:{threshold}"
+    if not _can_alert(key, int(rule.get("cooldown", 60))):
+        result["is_cooldown"] = True
+        return result
+
+    message = (
+        f"[{severity}] {label} ALERT\n"
+        f"Rule: {rule['name']}\n"
         f"Usage: {value}% (threshold: {threshold}%)"
     )
-    cooldown_memory[cooldown_key] = now
-    send_message(alert_msg)
-    return alert_msg, False
-
-
-def check_and_evaluate(rule: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Evaluate a single rule and trigger actions if necessary.
-    Returns a structured dictionary with state and alert info.
-    """
-    rule_name = rule["name"]
-    rtype = rule.get("type")
-    
-    result = {
-        "text": "Unknown",
-        "value": None,
-        "type": "text",
-        "is_alert": False,
-        "alert_msg": None,
-        "is_cooldown": False
-    }
-    
-    # ═══════════════════════════════════════════════
-    # THRESHOLD-BASED MONITORS (notify only)
-    # CPU / RAM / Disk — same pattern
-    # ═══════════════════════════════════════════════
-
-    if rtype == "cpu":
-        from collectors.system import check_cpu
-        usage = check_cpu()
-        result["type"] = "percent"
-        result["value"] = usage
-        result["text"] = f"CPU: {usage}%"
-
-        thresholds = rule.get("thresholds", [70, 85, 95])
-        threshold, severity = _get_severity(usage, thresholds)
-        if threshold is not None:
-            alert_msg, is_cd = _handle_threshold_alert(
-                rule_name, "CPU USAGE", usage, threshold, severity,
-                rule.get("cooldown", 60)
-            )
-            result["is_alert"] = not is_cd
-            result["is_cooldown"] = is_cd
-            result["alert_msg"] = alert_msg
-
-    elif rtype == "memory":
-        from collectors.system import check_memory
-        usage = check_memory()
-        result["type"] = "percent"
-        result["value"] = usage
-        result["text"] = f"RAM: {usage}%"
-
-        thresholds = rule.get("thresholds", [70, 85, 95])
-        threshold, severity = _get_severity(usage, thresholds)
-        if threshold is not None:
-            alert_msg, is_cd = _handle_threshold_alert(
-                rule_name, "MEMORY USAGE", usage, threshold, severity,
-                rule.get("cooldown", 60)
-            )
-            result["is_alert"] = not is_cd
-            result["is_cooldown"] = is_cd
-            result["alert_msg"] = alert_msg
-
-    elif rtype == "disk":
-        usage = check_disk(rule.get("mount_path", "/"))
-        result["type"] = "percent"
-        result["value"] = usage
-        result["text"] = f"Disk: {usage}%"
-
-        thresholds = rule.get("thresholds", [80, 90, 95])
-        threshold, severity = _get_severity(usage, thresholds)
-        if threshold is not None:
-            alert_msg, is_cd = _handle_threshold_alert(
-                rule_name, "DISK USAGE", usage, threshold, severity,
-                rule.get("cooldown", 300)
-            )
-            result["is_alert"] = not is_cd
-            result["is_cooldown"] = is_cd
-            result["alert_msg"] = alert_msg
-
-    # ═══════════════════════════════════════════════
-    # PROCESS MONITOR (notify only, no kill)
-    # ═══════════════════════════════════════════════
-
-    elif rtype == "process_auto":
-        from collectors.process import find_heavy_processes
-        cpu_thresh = int(rule.get("cpu_threshold", 80))
-        ram_thresh = int(rule.get("ram_threshold", 80))
-        wl = rule.get("whitelist", None)
-        heavy = find_heavy_processes(cpu_thresh, ram_thresh, wl)
-
-        if heavy:
-            result["text"] = f"{len(heavy)} heavy process(es)"
-            
-            cooldown = rule.get("cooldown", 30)
-            last_run = cooldown_memory.get(rule_name, 0)
-            now = time.time()
-
-            if now - last_run < cooldown:
-                result["is_cooldown"] = True
-            else:
-                proc_info = "\n".join([
-                    f"  - {p['name']} (PID:{p['pid']}) CPU:{p['cpu']}% RAM:{p['ram']}%"
-                    for p in heavy
-                ])
-                result["alert_msg"] = (
-                    f"[WARNING] *HEAVY PROCESS DETECTED*\n"
-                    f"Rule: {rule_name}\n"
-                    f"Found {len(heavy)} process(es):\n{proc_info}"
-                )
-                result["is_alert"] = True
-                cooldown_memory[rule_name] = now
-                send_message(result["alert_msg"])
-        else:
-            result["text"] = "All processes normal"
-
-    # ═══════════════════════════════════════════════
-    # SERVICE MONITOR (auto-restart + notify)
-    # ═══════════════════════════════════════════════
-
-    elif rtype == "service":
-        status = check_service(rule["service_name"])
-        result["text"] = f"Status: {status}"
-
-        if status == rule.get("if_status", "inactive"):
-            cooldown = rule.get("cooldown", 60)
-            last_run = cooldown_memory.get(rule_name, 0)
-            now = time.time()
-
-            if now - last_run < cooldown:
-                result["is_cooldown"] = True
-            else:
-                action_cmd = rule.get("action", f"systemctl restart {rule['service_name']}")
-                reason = f"Service {rule['service_name']} is {status}"
-                try:
-                    subprocess.run(action_cmd, shell=True, check=True)
-                    result["alert_msg"] = (
-                        f"[OK] *AUTO-RESTART SUCCESS*\n"
-                        f"Rule: {rule_name}\n"
-                        f"Reason: {reason}\n"
-                        f"Executed: `{action_cmd}`"
-                    )
-                except subprocess.CalledProcessError:
-                    result["alert_msg"] = (
-                        f"[FAIL] *AUTO-RESTART FAILED*\n"
-                        f"Rule: {rule_name}\n"
-                        f"Reason: {reason}\n"
-                        f"Failed: `{action_cmd}`"
-                    )
-
-                result["is_alert"] = True
-                cooldown_memory[rule_name] = now
-                if result["alert_msg"]:
-                    send_message(result["alert_msg"])
-
-    # ═══════════════════════════════════════════════
-    # LEGACY: process by name (backward compat)
-    # ═══════════════════════════════════════════════
-
-    elif rtype == "process":
-        from collectors.process import check_process
-        is_running = check_process(rule["process_name"])
-        status = "running" if is_running else "stopped"
-        result["text"] = f"Process: {status}"
-        if status == rule.get("if_status", "stopped"):
-            result["is_alert"] = True
-
+    send_message(message)
+    result["alert_msg"] = message
     return result
+
+
+def _process_result(rule: dict[str, Any]) -> dict[str, Any]:
+    heavy = find_heavy_processes(
+        int(rule.get("cpu_threshold", 80)),
+        int(rule.get("ram_threshold", 80)),
+        rule.get("whitelist"),
+    )
+    if not heavy:
+        return {"text": "All processes normal", "is_cooldown": False}
+
+    result = {"text": f"{len(heavy)} heavy process(es)", "is_cooldown": False}
+    if not _can_alert(rule["name"], int(rule.get("cooldown", 30))):
+        result["is_cooldown"] = True
+        return result
+
+    details = "\n".join(
+        f"- {item['name']} (PID {item['pid']}): CPU {item['cpu']}%, RAM {item['ram']}%"
+        for item in heavy
+    )
+    message = f"[WARNING] HEAVY PROCESS\nRule: {rule['name']}\n{details}"
+    send_message(message)
+    result["alert_msg"] = message
+    return result
+
+
+def _service_result(rule: dict[str, Any]) -> dict[str, Any]:
+    service = rule["service_name"]
+    status = check_service(service)
+    result = {"text": f"Service {service}: {status}", "is_cooldown": False}
+    if status != rule.get("if_status", "inactive"):
+        return result
+
+    if not _can_alert(rule["name"], int(rule.get("cooldown", 60))):
+        result["is_cooldown"] = True
+        return result
+
+    command_text = rule.get("action", f"systemctl restart {service}")
+    try:
+        subprocess.run(
+            shlex.split(command_text),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        message = f"[OK] SERVICE RESTARTED\nService: {service}\nCommand: {command_text}"
+    except (OSError, subprocess.SubprocessError) as error:
+        message = f"[FAIL] SERVICE RESTART FAILED\nService: {service}\nError: {error}"
+
+    send_message(message)
+    result["alert_msg"] = message
+    return result
+
+
+def check_and_evaluate(rule: dict[str, Any]) -> dict[str, Any]:
+    """Collect and evaluate one monitoring rule."""
+    rule_type = rule.get("type")
+
+    if rule_type == "cpu":
+        return _metric_result(rule, "CPU", check_cpu, [70, 85, 95])
+    if rule_type == "memory":
+        return _metric_result(rule, "RAM", check_memory, [70, 85, 95])
+    if rule_type == "disk":
+        path = rule.get("mount_path", "/")
+        return _metric_result(rule, "DISK", lambda: check_disk(path), [80, 90, 95])
+    if rule_type == "process_auto":
+        return _process_result(rule)
+    if rule_type == "service":
+        return _service_result(rule)
+
+    return {"text": f"Unknown rule type: {rule_type}", "is_cooldown": False}
