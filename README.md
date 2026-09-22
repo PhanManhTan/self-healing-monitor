@@ -47,7 +47,31 @@ Non-interactive mode for CI:
 ```bash
 python demo_crash.py --scenario cpu --duration 20 --workers 2
 ```
+## Dashboard 
+```
+Self-Healing Monitor  11:50:23
+────────────────────────────────────────
 
+ METRICS
+  CPU    ██████░░░░░░░░░░░░░░  28.5% (70/85/95%)
+  RAM    ████████████░░░░░░░░  61.2% (70/85/95%)
+  DISK   ██████████████░░░░░░  72.0% (80/90/95%)
+
+ PROCESSES
+  [OK] All processes normal
+
+ SERVICES
+  ● nginx                active
+  ● docker               active
+  ● mysql                active
+
+ RECENT EVENTS
+  11:48:12  [WARNING] *CPU USAGE ALERT*
+  11:49:05  [OK] *AUTO-RESTART SUCCESS*
+
+────────────────────────────────────────
+Ctrl+C to exit | rules.yaml to configure
+```
 ## GitHub Actions
 
 The workflow `.github/workflows/monitor.yml` starts the monitor, runs a bounded
